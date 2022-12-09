@@ -2,37 +2,6 @@ import math
 import numpy as np
 import pandas as pd
 
-
-gg = pd.Series(range(100000))
-from datetime import datetime
-print(datetime.now())
-sb = list(range(5000))
-for i in range(10000):
-    gg.loc[sb]
-print(datetime.now())
-
-sb = gg.index.isin(range(5000))
-print(datetime.now())
-for i in range(10000):
-    gg.loc[sb]
-print(datetime.now())
-
-
-j = pd.Series([1, 2, 3, 4])
-sb = pd.Series(dir(j))
-sb[sb.str.contains("iter")]
-
-k = j.__iter__()
-k = j.iteritems()
-k.__next__()
-
-# 1. quantile(10)
-# 2. < s <=s
-# 3.
-
-
-
-
 class _gd_y(pd.Series):
     """
     sigmoid function: y1=(1/(1+exp(x)))
@@ -48,33 +17,22 @@ class _gd_y(pd.Series):
         self.g1 = 1 / (1 + _exp) - y
         self.g2 = -_exp / (self.g1 ** 2)
 
-
-
-
-x = pd.DataFrame(np.random.random([1000, 10]))
-y = (pd.Series(np.random.random(1000)) > 0.8)
-
-param = pd.DataFrame(np.random.random([1000, 5]))
-quant = 10
-
-
-sbb = _gd_t(min_cnt=50)
-sbb.data(param, x, y)
-
-
-
-for i in sbb.iter_sep():
-    print(i)
-
-i[0]
-i[1]
-i[2]. value_counts()
-
 class _gd_t:
-    def __init__(self, quant=10, min_cnt=1000, ycls=None):
+    def __init__(self,
+                 quant=10,
+                 min_cnt=1000,
+                 l2=100,
+                 trace=2000,
+                 max_depth=4,
+                 max_nodes=17
+                 ):
         self.quant = quant
         self.min_cnt = min_cnt
-        pass
+        self.l2 = l2
+        self.trace = trace
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
+
 
     def data(self, param, x, y, weight=None, y1=None):
         """
@@ -119,6 +77,8 @@ class _gd_t:
 
 
             sep1 = list()
+            cntl = list()
+            cntr = list()
             for j in _sep:
                 if mask is not None:
                     gp_mask1 = (_xi1 < j) & mask
@@ -127,87 +87,195 @@ class _gd_t:
 
                 cnt1 = gp_mask1.sum()
                 if (cnt1 >= self.min_cnt):
-                    if (cnt - cnt1 >= self.min_cnt):
+                    if ((cnt - cnt1) >= self.min_cnt):
                         gp_mask += gp_mask1
                         sep1.append(j)
+                        cntl.append(cnt1)
+                        cntr.append(cnt - cnt1)
 
             if len(_sep) > 0:
-                yield (i, _sep, gp_mask)
+                yield (i, sep1, cntl, cntr, gp_mask)
 
     def iter_sep_obj(self, mask=None):
-        for i, j, _m in self.iter_sep(mask):
-            mask = _m > 0
+        res_list = list()
+        for i, j, cntl, cntr, _m in self.iter_sep(mask):
+            _mask = _m > 0
             p1 = self.param.loc[_mask]
             p2 = self.param2.loc[_mask]
             g1 = self.y1.g1.loc[_mask]
-            g2 = self.y1.g2.loc[_mask]            
-            m = _m.loc[_mask]
+            g2 = self.y1.g2.loc[_mask]
+            m0 = _m.loc[_mask]
+            m = m0. reset_index(drop=True)
 
-            g1_p1 = p1.multiply(g1, axis=0)
-            g2_p2 = p2.multiply(g2, axis=0)
-            g1_gp = g1_p1.groupby(m).agg(sum).cumsum()
-            g2_gp = g2_p2.groupby(m).agg(sum).cumsum()
-            g1_t = g1_gp.iloc[ - 1]
-            g2_t = g2_gp.iloc[ - 1]
-            g1_gp_l = g1_gp.iloc[: -1]
-            g2_gp_l = g2_gp.iloc[: -1]            
-            g1_gp_r = (g1_t - g1_gp_l)
-            g2_gp_r = (g2_t - g2_gp_l)
-
-            obj_l = g1_gp_l ** 2 / g2_gp_l
-            obj_r = g1_gp_r ** 2 / g2_gp_r
+            idx_gp = {k[0]:k[1]. index for k in m.groupby(m)}
             
-            obj_t = g1_t ** 2 / g2_t
-            obj_delta = obj_t - obj_l + obj_r
+            g2_matrix = p2.multiply(g2, axis=0).values[:, :, None]*p2.values[:, None, :]
+            g2_agg = np.array([g2_matrix[k2]. sum(axis=0) for k1, k2 in idx_gp.items()])
+            g2_cumsum = g2_agg.cumsum(axis=0)
+            
+            g1_matrix = p1.multiply(g1, axis=0)            
+            g1_cumsum = g1_matrix.groupby(m0).agg(sum).cumsum()
+            
+            g1_t = g1_cumsum.iloc[ - 1]
+            g2_t = g2_cumsum[ - 1]
+            
+            g1_l = g1_cumsum.iloc[: -1]
+            g2_l = g2_cumsum[: -1]
+            g1_r = (g1_t - g1_l)
+            g2_r = (g2_t - g2_l)
 
-            yield i, j, obj_delta, g2_gp_l, g2_gp_r
+            n_sample = len(idx_gp) - 1
+            n_idx = g1_t.shape[0]
+            l2_eye = -np.eye(n_idx)*self.l2
 
+            g2_r_inv = np.linalg.inv(g2_r + l2_eye)
+            gd_r = -np.matmul(g1_r.values[:, None, :], g2_r_inv)[:, 0, :] / 2            
+            obj_r = (g1_r * gd_r).sum(axis=1) / 2
+            trace_r = np.diagonal(g2_r, axis1=1, axis2=2).sum(axis=1)            
+            
+            g2_l_inv = np.linalg.inv(g2_l + l2_eye)
+            gd_l = -np.matmul(g1_l.values[:, None, :], g2_l_inv)[:, 0, :] / 2
+            obj_l = (g1_l * gd_l).sum(axis=1) / 2
+            trace_l = np.diagonal(g2_l, axis1=1, axis2=2).sum(axis=1)
+            
+            g2_t_inv = np.linalg.inv(g2_t + l2_eye)
+            gd_t = -(g1_t@g2_t_inv) / 2
+            obj_t = (g1_t * gd_t).sum() / 2
+            delta_obj = obj_r + obj_l - obj_t
 
+            res = pd.DataFrame(columns=["idx", "delta", "trace_l", "trace_r", "threshold", "cntl", "cntr"], index=range(n_sample))
+            res["delta"] = delta_obj.values
+            res["trace_l"] = trace_l
+            res["trace_r"] = trace_r
+            res["threshold"] = j
+            res["idx"] = i
+            res["cntl"] = cntl
+            res["cntr"] = cntr
+            res_list.append(res)
 
+        if len(res_list) > 0:
+            return pd.concat(res_list)
+        else:
+            return pd.DataFrame([])
 
-
-for i in sbb.iter_sep():
-    print(i)
-
-i[0]
-i[1]
-i[2]
-
-                
-    def obj(self, m1, i):
-
-
-        
+class _gd_node_info:
+    def __init__(self, info=None):
+        if info is None:
+            self.info = []
+            self.root = self
+            self.leaves = [self]
+        else:
+            self.info = info
+            
+    def save(self):
         pass
-
-    def obj_delta(self, m1, m2, m3):
-
-        if mask is not None:
-            _m1 = _m & mask
-        else:
-            _m1 = _m
-
-        if mask is not None:
-            _m2 = (~_m) & mask
-        else:
-            _m2 = (~_m)
-        
-        self.obj(_m1) + self.obj(_m2) - self.obj(_m3)
-
-
-    
 
     def trans(self):
         pass
 
+    def calc_mask(self, x):
+        if len(self.info) == 0:
+            self.mask = pd.Series(True, index=x.index)
+        else:
+            idx, v, lr= self.info[ - 1]
+            if lr == "l":
+                cond = x[idx] < v
+            else:
+                cond = x[idx] >= v
+            self.mask = self.p.mask & cond
+            
+
+class _gd_node(_gd_node_info):
+    def __init__(self, gd, info=None, p=None):
+        self.gd = gd
+        if info is None:
+            self.info = []
+            self.root = self
+            self.leaves = [self]
+        else:
+            self.info = info
+            self.p = p
+            self.root = self.p.root
+
+        self.calc_mask()
+
+    def split(self, idx, v):
+        info_l = self.info.copy()
+        info_l.append((idx, v, "l"))
+        self.l = _gd_node(self.gd, info_l, p=self)
+        self.l.root = self.root
+
+        info_r = self.info.copy()
+        info_r.append((idx, v, "r"))
+        self.r = _gd_node(self.gd, info_r, p=self)
+        self.r.root = self.root
         
+        self.root.leaves.pop(self.root.leaves.index(self))
+        self.root.leaves.append(self.l)
+        self.root.leaves.append(self.r)
+        
+    def calc_mask(self):
+        super().calc_mask(self.gd.x)
+
+    def obj(self):
+        if hasattr(self, "obj_info"):
+            return
+        self.obj_info = self.gd.iter_sep_obj(self.mask)
+        if self.obj_info.shape[0] == 0:
+            self.obj_info_bst = None
+        self.obj_info_bst = self.obj_info.iloc[self.obj_info["delta"]. argmax()]
+
+    def best_select(self):
+        bd = self.best_dict
+        bd1 = bd[(bd["trace_l"] < -self.gd.trace) & (bd["trace_r"] < -self.gd.trace)]
+        if bd1.shape[0] <= 0:
+            return None, None
+        
+        idx0 = bd1.index[bd1["delta"]. argmax()]
+        it = bd1.loc[idx0]
+        return idx0, it
+        
+    def best_split(self):
+        best_dict = dict()
+        for j, i in enumerate(self.leaves):
+            i.obj()
+            bst = i.obj_info_bst
+            if bst is None:
+                continue
+            best_dict[j] = bst
+
+        if len(best_dict) == 0:
+            return None
+        
+        best_dict = pd.DataFrame(best_dict).T
+        self.best_dict = best_dict
+        idx0, it = self.best_select()
+        if idx0 is None:
+            return None
+        
+        idx = it["idx"]
+        v = it["threshold"]
+        self.leaves[idx0]. split(idx, v)
+        return 1
+
+    def rec_split(self):
+        while True:
+            _res = self.best_split()
+            if _res is None:
+                break
 
 
-
-
-
-
-
+if __name__ == "__main__":
+    x = pd.DataFrame(np.random.random([10000, 10]))
+    y = (pd.Series(np.random.random(10000)) > 0.8)
+    param = pd.DataFrame(np.random.random([10000, 10]))
+    sbb = _gd_t(min_cnt=1000)
+    sbb.data(param, x, y)
+    sbb = _gd_t(min_cnt=50)
+    sbb.data(param, x, y)
+    gn = _gd_node(sbb)
+    gn.rec_split()
+    [i.mask.sum() for i in gn.leaves]
 
 
 
